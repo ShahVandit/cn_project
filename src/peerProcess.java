@@ -12,94 +12,69 @@ import java.util.logging.Logger;
 import java.util.logging.SimpleFormatter;
 
 public class peerProcess {
-    private int peer_ID;
-    private int number_of_preferred_neighbors;
-    private long unchocking_interval;
-    private long optimistic_unchoking_interval;
-    private String file_name;
-    private int file_size;
-    private int sPort;
-    private boolean hasFile;
+    private int node_identifier;
+    private int preferred_peer_limit;
+    private long unchoke_period;
+    private long optimistic_unchoke_period;
+    private String target_file;
+    private int total_file_bytes;
+    private int connection_port;
+    private boolean is_file_downloaded;
     private Peer process;
-    private ArrayList<Peer> existingPeers;
-    private ArrayList<Peer> futurePeers;
-    private HashMap<Integer, PeerMessageProcessor> connectionArray;
-    private ArrayList<Integer> preferredNeighbors;
-    private int optUnchoked;
-    private int piece_size;
-    private volatile Bitfield bitfield;
-    private volatile byte[][] pieces;
+    private ArrayList<Peer> currentPeerNodes;
+    private ArrayList<Peer> potential_peers;
+    private HashMap<Integer, PeerMessageProcessor> active_peers;
+    private ArrayList<Integer> desiredNeighbors;
+    private int optimistic_unchoked;
+    private int file_segment_size;
+    private volatile Bitfield piece_map;
+    private volatile byte[][] file_segments;
     private volatile HashMap<Integer, Double> rates;
 
-    private class Bitfield {
-        byte[] bits;
-
-        private HashMap<Integer, Integer> currentlyRequesting = new HashMap<>();
-
-        public synchronized void markPieceAsDownloaded(int index) {
-            bits[index] = (byte) 1;
-        }
-
-        public void broadcastNewPieceAvailability(int index) {
-            for (PeerMessageProcessor thread : connectionArray.values()) {
-                if (thread.clientBitfield.bits[index] == 0) {
-                    thread.notifyPeerOfNewPiece(index);
-                }
-            }
-        }
-
-        public void broadcastFileCompletionToAllPeers() {
-            for (PeerMessageProcessor thread : connectionArray.values()) {
-                thread.transmitBitfield();
-            }
-        }
-
-        public boolean checkIfAllPiecesAreDownloaded() {
-            for (byte hasPiece : bits) {
-                if (hasPiece == 0) {
-                    return false;
-                }
-            }
-            
-            return true;
-        }
-
-        public synchronized void addPieceRequest(int index, int id) {
-            currentlyRequesting.put(id, index);
-        }
-
-        public synchronized void removePieceRequest(int index) {
-            ArrayList<Integer> removal = new ArrayList<>();
-            for (Map.Entry<Integer, Integer> entry : currentlyRequesting.entrySet()) {
-                if (entry.getValue() == index) {
-                    removal.add(entry.getKey());
-                }
-            }
-            for (Integer key : removal) {
-                currentlyRequesting.remove(key);
-            }
-        }
-
-    }
-
     public class Peer {
-        int peerID;
+        int node_identifier;
         String address;
         int port;
-        boolean hasFile;
+        boolean is_file_downloaded;
 
-        public Peer(int id, String address, int port, boolean hasFile) {
-            this.peerID = id;
+        public Peer(int id, String address, int port, boolean is_file_downloaded) {
+            this.node_identifier = id;
             this.address = address;
             this.port = port;
-            this.hasFile = hasFile;
+            this.is_file_downloaded = is_file_downloaded;
         }
     }
+
+    public static void main(String[] args) throws Exception {
+    // Ensure a command line argument for peer ID is provided
+    if (args.length == 0) {
+        throw new Exception("Error: Peer ID must be provided");
+    }
+
+    // Check if the peer ID is a valid integer
+    int peer_ID_input;
+    try {
+        peer_ID_input = Integer.parseInt(args[0]);
+    } catch (NumberFormatException e) {
+        throw new Exception("Error: Peer ID must be an integer");
+    }
+
+    // Delete any existing log files for the given peer ID
+    File folder = new File(".");
+    for (File f : folder.listFiles()) {
+        if (f.getName().endsWith(peer_ID_input + ".log")) {
+            f.delete();
+        }
+    }
+
+    // Create and start the peer process for the specified peer ID
+    peerProcess peer_process = new peerProcess(peer_ID_input);
+}
 
     public void selectAndUnchokeRandomPeer() {
         // get list of peers
         ArrayList<PeerMessageProcessor> possiblePeers = new ArrayList<>();
-        Object[] temp = connectionArray.values().toArray();
+        Object[] temp = active_peers.values().toArray();
         for (Object obj : temp) {
             possiblePeers.add((PeerMessageProcessor) obj);
         }
@@ -111,240 +86,79 @@ public class peerProcess {
         if (possiblePeers.size() > 0) {
             int random_index = new Random().nextInt(possiblePeers.size());
 
-            PeerMessageProcessor optUnchoked = possiblePeers.get(random_index);
+            PeerMessageProcessor optimistic_unchoked = possiblePeers.get(random_index);
 
-            optUnchoked.logOptimisticUnchokingEvent();
-            optUnchoked.unChokePeerConnection();
+            optimistic_unchoked.logOptimisticUnchokingEvent();
+            optimistic_unchoked.unChokePeerConnection();
         }
     }
 
+    private class Bitfield {
+    byte[] bits;
 
-    // is responsible for setting class variables using the peer_ID, the Common.cfg, and PeerInfo.cfg
-    public peerProcess(int p_ID) {
-        this.peer_ID = p_ID;
+    private HashMap<Integer, Integer> currentlyRequesting = new HashMap<>();
 
-        // reading Common.cfg
-        Properties common = new Properties();
-        try (FileInputStream fis = new FileInputStream("Common.cfg")) {
-            common.load(fis);
-            fis.close();
-        } catch (IOException ioException) {
-            ioException.printStackTrace();
+    public synchronized void markPieceAsDownloaded(int index) {
+        bits[index] = (byte) 1;
+    }
+
+    public void broadcastFileCompletionToAllPeers() {
+        for (PeerMessageProcessor thread : active_peers.values()) {
+            thread.transmitBitfield();
         }
+    }
 
-        this.number_of_preferred_neighbors = Integer.parseInt(common.getProperty("NumberOfPreferredNeighbors"));
-        this.unchocking_interval = Integer.parseInt(common.getProperty("UnchokingInterval"));
-        this.optimistic_unchoking_interval = Integer.parseInt(common.getProperty("OptimisticUnchokingInterval"));
-
-        this.file_name = common.getProperty("FileName");
-        this.file_size = Integer.parseInt(common.getProperty("FileSize"));
-        this.piece_size = Integer.parseInt(common.getProperty("PieceSize"));
-        this.preferredNeighbors = new ArrayList<>();
-
-        // setting bitfield
-        int bitfield_size = determineBitfieldLength(this.file_size, this.piece_size);
-        this.bitfield = new Bitfield();
-        this.bitfield.bits = new byte[bitfield_size];
-        this.pieces = new byte[bitfield_size][];
-
-        // reading PeerInfo.cfg
-        this.existingPeers = new ArrayList<>();
-        this.futurePeers = new ArrayList<>();
-        this.connectionArray = new HashMap<>();
-        this.rates = new HashMap<Integer, Double>();
-        File file = new File("PeerInfo.cfg");
-        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
-            for (String line; (line = br.readLine()) != null; ) {
-
-                String[] split = line.split(" ");
-
-                int new_id = Integer.parseInt(split[0]);
-                String new_address = split[1];
-                int new_port = Integer.parseInt(split[2]);
-                boolean hasFile = Integer.parseInt(split[3]) == 1;
-
-                if (new_id != this.peer_ID) {
-                    this.existingPeers.add(new Peer(new_id, new_address, new_port, hasFile));
-                    this.rates.put(new_id, 0.0);
-                } else {
-                    process = new Peer(this.peer_ID, new_address, new_port, hasFile);
-                    this.sPort = new_port;
-                    this.hasFile = hasFile;
-                    break;
-                }
-
-            }
-            // keep reading after existingPeers stopped
-            for (String line; (line = br.readLine()) != null; ) {
-                String[] split = line.split(" ");
-
-                int new_id = Integer.parseInt(split[0]);
-                String new_address = split[1];
-                int new_port = Integer.parseInt(split[2]);
-                boolean hasFile = Integer.parseInt(split[3]) == 1;
-
-                this.futurePeers.add(new Peer(new_id, new_address, new_port, hasFile));
-                this.rates.put(new_id, 0.0);
-            }
-        } catch (IOException ioException) {
-            ioException.printStackTrace();
-        }
-        File dir = new File("./" + String.valueOf(peer_ID));
-        if (!dir.exists())
-        {
-            dir.mkdirs();
-        }
-
-        // setting bitfield default value based on having the file
-        if (this.hasFile) {
-            Arrays.fill(bitfield.bits, (byte) 1);
-            Path path = Paths.get("./" + this.peer_ID + "/" + file_name);
-            byte[] fileBytes = new byte[0];
-            
-            try {
-                fileBytes = Files.readAllBytes(path);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-            int numBytes = piece_size;
-            for (int i = 0; i < bitfield_size; i++) {
-                if (i == bitfield_size - 1)
-                {
-                    numBytes = file_size - (i * piece_size);
-                }
-                byte[] temp = new byte[numBytes];
-                if (numBytes - 1 >= 0) {
-                    System.arraycopy(fileBytes, (i * piece_size), temp, 0, numBytes);
-                }
-                pieces[i] = temp;
-            }
-
-        } else {
-            Arrays.fill(bitfield.bits, (byte) 0);
-            bitfield.bits[0] = (byte) 0;
-        }
-
-        // function to connect the process to the others
-        establishConnectionsWithPeers();
-
-        Timer time = new Timer(); // Instantiate Timer Object
-        PeriodicNeighborSelector choosePreferred = new PeriodicNeighborSelector();
-        OptimisticUnchokeTask optimisticUnchoke = new OptimisticUnchokeTask();
-
-        time.schedule(choosePreferred, 1, ((long) 1000 * unchocking_interval));
-        time.schedule(optimisticUnchoke, 1, ((long) 1000 * optimistic_unchoking_interval));
-
-        boolean ok = false;
-        while (!ok) {
-            ok = isDownloadCompleteForAllPeers();
-        }
-
-        int file_length = 0;
-
-        for (byte[] piece : this.pieces) {
-            file_length += piece.length;
-        }
-
-
-        byte[] file_data = new byte[file_length];
-        int amount_read = 0;
-
-        for (byte[] piece : this.pieces) {
-            System.arraycopy(piece, 0, file_data, amount_read, piece.length);
-            amount_read += piece.length;
-        }
-
-        if (!process.hasFile) {
-            try {
-                OutputStream os = new FileOutputStream("./" + this.peer_ID + "/" + file_name);
-                os.write(file_data);
-                os.close();
-            } catch (IOException e) {
-                e.printStackTrace();
+    public boolean checkIfAllPiecesAreDownloaded() {
+        for (byte hasPiece : bits) {
+            if (hasPiece == 0) {
+                return false;
             }
         }
         
-
-        choosePreferred.cancel();
-        optimisticUnchoke.cancel();
-
-        for (PeerMessageProcessor thread : connectionArray.values()) {
-            thread.client_has_file = true;
-            thread.client_interested = false;
-            thread.host_has_file = true;
-            thread.host_interested = false;
-
-            thread.done = true;
-        }
-
-        System.exit(0);
+        return true;
     }
 
-    public void establishConnectionsWithPeers() {
-    try {
-        // Connect to existing peers
-        if (this.existingPeers.size() > 0) {
-            for (Peer current : this.existingPeers) {
-                // Skip connecting to self
-                if (current.peerID == this.peer_ID) {
-                    continue;
-                }
-
-                // Create a socket to connect to the peer
-                Socket requestSocket = new Socket(current.address, current.port);
-
-                // Initialize the bitfield for the client
-                Bitfield client_bitfield = new Bitfield();
-                client_bitfield.bits = new byte[bitfield.bits.length];
-
-                // Create and start a handler for communication
-                PeerMessageProcessor handler = new PeerMessageProcessor(requestSocket, current, process, this.bitfield, client_bitfield, this.pieces, this.rates);
-                handler.initiateConnectionHandshake();
-                handler.start();
-
-                // Add the handler to the connection list
-                this.connectionArray.put(current.peerID, handler);
-            }
-        }
-
-        // Listen for future peers and accept their connections
-        if (this.futurePeers.size() > 0) {
-            ServerSocket listener = new ServerSocket(this.sPort);
-
-            for (Peer future : this.futurePeers) {
-                // Initialize the bitfield for the client
-                Bitfield client_bitfield = new Bitfield();
-                client_bitfield.bits = new byte[bitfield.bits.length];
-
-                // Create and start a handler for communication
-                PeerMessageProcessor handler = new PeerMessageProcessor(listener.accept(), future, process, this.bitfield, client_bitfield, this.pieces, this.rates);
-                handler.waitForConnectionHandshake();
-                handler.start();
-
-                // Add the handler to the connection list
-                this.connectionArray.put(future.peerID, handler);
-            }
-        }
-    } catch (IOException ioException) {
-        ioException.printStackTrace();
+    public synchronized void addPieceRequest(int index, int id) {
+        currentlyRequesting.put(id, index);
     }
-}
 
-public void identifyTopPeersBasedOnRate() {
+    public synchronized void removePieceRequest(int index) {
+        ArrayList<Integer> removal = new ArrayList<>();
+        for (Map.Entry<Integer, Integer> entry : currentlyRequesting.entrySet()) {
+            if (entry.getValue() == index) {
+                removal.add(entry.getKey());
+            }
+        }
+        for (Integer key : removal) {
+            currentlyRequesting.remove(key);
+        }
+    }
+
+    public void broadcastNewPieceAvailability(int index) {
+        for (PeerMessageProcessor thread : active_peers.values()) {
+            if (thread.clientBitfield.bits[index] == 0) {
+                thread.notifyPeerOfNewPiece(index);
+            }
+        }
+    }
+
+    }
+
+    public void identifyTopPeersBasedOnRate() {
     ArrayList<Integer> preferred = new ArrayList<>();
     
     // Select top peers based on their download rates
-    for (int i = 0; i < this.number_of_preferred_neighbors; i++) {
+    for (int i = 0; i < this.preferred_peer_limit; i++) {
         HashMap<Integer, Double> temp = new HashMap<>();
         double fastest = 0;
 
         // If no peers are downloading or all have files, randomly select peers
-        if (Collections.max(this.rates.values()) == 0 || this.connectionArray.get(this.rates.keySet().toArray()[0]).host_has_file) {
+        if (Collections.max(this.rates.values()) == 0 || this.active_peers.get(this.rates.keySet().toArray()[0]).host_has_file) {
             Random rand = new Random();
             ArrayList<Integer> arrRates = new ArrayList<>();
             
             for (int key : this.rates.keySet()) {
-                if (this.connectionArray.get(key).client_interested) {
+                if (this.active_peers.get(key).client_interested) {
                     arrRates.add(key);
                 }
             }
@@ -366,14 +180,14 @@ public void identifyTopPeersBasedOnRate() {
                 if (preferred.contains(entry.getKey())) {
                     continue;
                 }
-                if (temp.isEmpty() && this.connectionArray.get(entry.getKey()).client_interested) {
+                if (temp.isEmpty() && this.active_peers.get(entry.getKey()).client_interested) {
                     temp.put(entry.getKey(), entry.getValue());
                 } else if (temp.isEmpty()) {
                     continue;
-                } else if (Collections.min(temp.values()) == 0 || Collections.min(temp.values()) > entry.getValue() && this.connectionArray.get(entry.getKey()).client_interested) {
+                } else if (Collections.min(temp.values()) == 0 || Collections.min(temp.values()) > entry.getValue() && this.active_peers.get(entry.getKey()).client_interested) {
                     temp.clear();
                     temp.put(entry.getKey(), entry.getValue());
-                } else if (Collections.min(temp.values()) == entry.getValue() && this.connectionArray.get(entry.getKey()).client_interested) {
+                } else if (Collections.min(temp.values()) == entry.getValue() && this.active_peers.get(entry.getKey()).client_interested) {
                     temp.put(entry.getKey(), entry.getValue());
                 } else {
                     continue;
@@ -391,27 +205,264 @@ public void identifyTopPeersBasedOnRate() {
     }
 
     // Update preferred neighbors and handle choking/unchoking
-    for (int i = 0; i < this.number_of_preferred_neighbors; i++) {
-        if (preferred.size() > i && this.preferredNeighbors.contains(preferred.get(i))) {
+    for (int i = 0; i < this.preferred_peer_limit; i++) {
+        if (preferred.size() > i && this.desiredNeighbors.contains(preferred.get(i))) {
             continue;
-        } else if (this.preferredNeighbors.size() > i && !preferred.contains(this.preferredNeighbors.get(i))) {
-            this.connectionArray.get(this.preferredNeighbors.get(i)).chokePeerConnection();
-        } else if (preferred.size() > i && !this.preferredNeighbors.contains(preferred.get(i))) {
-            this.connectionArray.get(preferred.get(i)).unChokePeerConnection();
-            this.connectionArray.get(preferred.get(i)).logPreferredPeerSelection();
+        } else if (this.desiredNeighbors.size() > i && !preferred.contains(this.desiredNeighbors.get(i))) {
+            this.active_peers.get(this.desiredNeighbors.get(i)).chokePeerConnection();
+        } else if (preferred.size() > i && !this.desiredNeighbors.contains(preferred.get(i))) {
+            this.active_peers.get(preferred.get(i)).unChokePeerConnection();
+            this.active_peers.get(preferred.get(i)).logPreferredPeerSelection();
         }
     }
-    this.preferredNeighbors = preferred;
+    this.desiredNeighbors = preferred;
 }
+
+
+    // is responsible for setting class variables using the peer_ID, the Common.cfg, and PeerInfo.cfg
+    public peerProcess(int p_ID) {
+        this.node_identifier = p_ID;
+
+        // reading Common.cfg
+        Properties common = new Properties();
+        try (FileInputStream fis = new FileInputStream("Common.cfg")) {
+            common.load(fis);
+            fis.close();
+        } catch (IOException ioException) {
+            ioException.printStackTrace();
+        }
+
+        this.preferred_peer_limit = Integer.parseInt(common.getProperty("NumberOfPreferredNeighbors"));
+        this.unchoke_period = Integer.parseInt(common.getProperty("UnchokingInterval"));
+        this.optimistic_unchoke_period = Integer.parseInt(common.getProperty("OptimisticUnchokingInterval"));
+
+        this.target_file = common.getProperty("FileName");
+        this.total_file_bytes = Integer.parseInt(common.getProperty("FileSize"));
+        this.file_segment_size = Integer.parseInt(common.getProperty("PieceSize"));
+        this.desiredNeighbors = new ArrayList<>();
+
+        // setting bitfield
+        int bitfield_size = determineBitfieldLength(this.total_file_bytes, this.file_segment_size);
+        this.piece_map = new Bitfield();
+        this.piece_map.bits = new byte[bitfield_size];
+        this.file_segments = new byte[bitfield_size][];
+
+        // reading PeerInfo.cfg
+        this.currentPeerNodes = new ArrayList<>();
+        this.potential_peers = new ArrayList<>();
+        this.active_peers = new HashMap<>();
+        this.rates = new HashMap<Integer, Double>();
+        File file = new File("PeerInfo.cfg");
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            for (String line; (line = br.readLine()) != null; ) {
+
+                String[] split = line.split(" ");
+
+                int new_id = Integer.parseInt(split[0]);
+                String new_address = split[1];
+                int new_port = Integer.parseInt(split[2]);
+                boolean is_file_downloaded = Integer.parseInt(split[3]) == 1;
+
+                if (new_id != this.node_identifier) {
+                    this.currentPeerNodes.add(new Peer(new_id, new_address, new_port, is_file_downloaded));
+                    this.rates.put(new_id, 0.0);
+                } else {
+                    process = new Peer(this.node_identifier, new_address, new_port, is_file_downloaded);
+                    this.connection_port = new_port;
+                    this.is_file_downloaded = is_file_downloaded;
+                    break;
+                }
+
+            }
+            // keep reading after existingPeers stopped
+            for (String line; (line = br.readLine()) != null; ) {
+                String[] split = line.split(" ");
+
+                int new_id = Integer.parseInt(split[0]);
+                String new_address = split[1];
+                int new_port = Integer.parseInt(split[2]);
+                boolean is_file_downloaded = Integer.parseInt(split[3]) == 1;
+
+                this.potential_peers.add(new Peer(new_id, new_address, new_port, is_file_downloaded));
+                this.rates.put(new_id, 0.0);
+            }
+        } catch (IOException ioException) {
+            ioException.printStackTrace();
+        }
+        File dir = new File("./" + String.valueOf(node_identifier));
+        if (!dir.exists())
+        {
+            dir.mkdirs();
+        }
+
+        // setting bitfield default value based on having the file
+        if (this.is_file_downloaded) {
+            Arrays.fill(piece_map.bits, (byte) 1);
+            Path path = Paths.get("./" + this.node_identifier + "/" + target_file);
+            byte[] fileBytes = new byte[0];
+            
+            try {
+                fileBytes = Files.readAllBytes(path);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+            int numBytes = file_segment_size;
+            for (int i = 0; i < bitfield_size; i++) {
+                if (i == bitfield_size - 1)
+                {
+                    numBytes = total_file_bytes - (i * file_segment_size);
+                }
+                byte[] temp = new byte[numBytes];
+                if (numBytes - 1 >= 0) {
+                    System.arraycopy(fileBytes, (i * file_segment_size), temp, 0, numBytes);
+                }
+                file_segments[i] = temp;
+            }
+
+        } else {
+            Arrays.fill(piece_map.bits, (byte) 0);
+            piece_map.bits[0] = (byte) 0;
+        }
+
+        // function to connect the process to the others
+        establishConnectionsWithPeers();
+
+        Timer time = new Timer(); // Instantiate Timer Object
+        PeriodicNeighborSelector choosePreferred = new PeriodicNeighborSelector();
+        OptimisticUnchokeTask optimisticUnchoke = new OptimisticUnchokeTask();
+
+        time.schedule(choosePreferred, 1, ((long) 1000 * unchoke_period));
+        time.schedule(optimisticUnchoke, 1, ((long) 1000 * optimistic_unchoke_period));
+
+        boolean ok = false;
+        while (!ok) {
+            ok = isDownloadCompleteForAllPeers();
+        }
+
+        int file_length = 0;
+
+        for (byte[] piece : this.file_segments) {
+            file_length += piece.length;
+        }
+
+
+        byte[] file_data = new byte[file_length];
+        int amount_read = 0;
+
+        for (byte[] piece : this.file_segments) {
+            System.arraycopy(piece, 0, file_data, amount_read, piece.length);
+            amount_read += piece.length;
+        }
+
+        if (!process.is_file_downloaded) {
+            try {
+                OutputStream os = new FileOutputStream("./" + this.node_identifier + "/" + target_file);
+                os.write(file_data);
+                os.close();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        
+
+        choosePreferred.cancel();
+        optimisticUnchoke.cancel();
+
+        for (PeerMessageProcessor thread : active_peers.values()) {
+            thread.client_has_file = true;
+            thread.client_interested = false;
+            thread.host_has_file = true;
+            thread.host_interested = false;
+
+            thread.done = true;
+        }
+
+        System.exit(0);
+    }
+
+    public void establishConnectionsWithPeers() {
+    try {
+        // Connect to existing peers
+        if (this.currentPeerNodes.size() > 0) {
+            for (Peer current : this.currentPeerNodes) {
+                // Skip connecting to self
+                if (current.node_identifier == this.node_identifier) {
+                    continue;
+                }
+
+                // Create a socket to connect to the peer
+                Socket requestSocket = new Socket(current.address, current.port);
+
+                // Initialize the bitfield for the client
+                Bitfield client_bitfield = new Bitfield();
+                client_bitfield.bits = new byte[piece_map.bits.length];
+
+                // Create and start a handler for communication
+                PeerMessageProcessor handler = new PeerMessageProcessor(requestSocket, current, process, this.piece_map, client_bitfield, this.file_segments, this.rates);
+                handler.initiateConnectionHandshake();
+                handler.start();
+
+                // Add the handler to the connection list
+                this.active_peers.put(current.node_identifier, handler);
+            }
+        }
+
+        // Listen for future peers and accept their connections
+        if (this.potential_peers.size() > 0) {
+            ServerSocket listener = new ServerSocket(this.connection_port);
+
+            for (Peer future : this.potential_peers) {
+                // Initialize the bitfield for the client
+                Bitfield client_bitfield = new Bitfield();
+                client_bitfield.bits = new byte[piece_map.bits.length];
+
+                // Create and start a handler for communication
+                PeerMessageProcessor handler = new PeerMessageProcessor(listener.accept(), future, process, this.piece_map, client_bitfield, this.file_segments, this.rates);
+                handler.waitForConnectionHandshake();
+                handler.start();
+
+                // Add the handler to the connection list
+                this.active_peers.put(future.node_identifier, handler);
+            }
+        }
+    } catch (IOException ioException) {
+        ioException.printStackTrace();
+    }
+}
+
 
 // Calculate the number of pieces in a file based on file size and piece size
-public int determineBitfieldLength(int file_size, int piece_size) {
-    return (int) Math.ceil(((float) file_size) / ((float) piece_size));
+public int determineBitfieldLength(int total_file_bytes, int file_segment_size) {
+    return (int) Math.ceil(((float) total_file_bytes) / ((float) file_segment_size));
 }
 
 
-    private static class PeerMessageProcessor extends Thread {
-        // Socket representing the connection between peers.
+
+ public boolean isDownloadCompleteForAllPeers() {
+    // Check if this peer has downloaded all pieces
+    if (!this.piece_map.checkIfAllPiecesAreDownloaded()) {
+        return false;
+    }
+
+    // Check if all connected peers have downloaded all pieces
+    for (PeerMessageProcessor peer : active_peers.values()) {
+        if (!peer.clientBitfield.checkIfAllPiecesAreDownloaded()) {
+            return false;
+        }
+    }
+    return true;  // Return true if all peers have completed the download
+}
+
+public class PeriodicNeighborSelector extends TimerTask {
+    // Periodically selects top peers based on their download rate
+    public void run() {
+        identifyTopPeersBasedOnRate();
+    }
+}
+
+
+private static class PeerMessageProcessor extends Thread {
+// Socket representing the connection between peers.
 private Socket connection;
 
 // Input stream to read data from the connected peer's socket.
@@ -521,8 +572,62 @@ public void run() {
     Thread.currentThread().interrupt();
 }
 
+    private void processMessageWithoutPayload(byte type) {
+    // Update state variables based on message type
+    if (type == CHOKE) {
+        host_choked = true; // Host is choked, stop receiving pieces
+        writeLogMessage("Peer " + hostId + " received choke message from Peer " + clientId);
+        hostBitfield.currentlyRequesting.remove(this.clientId); // Remove requests from the host
+    } else if (type == UNCHOKE) {
+        host_choked = false; // Host is unchoked, can receive pieces
+        writeLogMessage("Peer " + hostId + " received unchoke message from Peer " + clientId);
 
-        private void receiveMessageWithPayload(byte type, int msgLen) {
+        // Check if the host is interested in pieces from the client
+        host_interested = checkForMissingPieces(clientBitfield.bits);
+
+        // Request a missing piece if interested
+        if (host_interested) {
+            int next_piece = selectRandomMissingPiece();
+            if (next_piece >= 0) {
+                hostBitfield.addPieceRequest(this.clientId, next_piece);
+                requestFilePiece(next_piece); // Request the next piece
+            }
+        }
+    } else if (type == INTERESTED) {
+        client_interested = true; // Client is interested in receiving pieces
+        writeLogMessage("Peer " + hostId + " received interest message from Peer " + clientId);
+
+    } else if (type == NOT_INTERESTED) {
+        client_interested = false; // Client is no longer interested
+        writeLogMessage("Peer " + hostId + " received not interested message from Peer " + clientId);
+    }
+}
+            public void initiateConnectionHandshake() {
+    try {
+        writeLogMessage("Initiating existing peer handshake: " + clientId);
+
+        // Prepare the handshake message
+        ByteArrayOutputStream send = new ByteArrayOutputStream(32);
+
+        byte[] header = "P2PFILESHARINGPROJ".getBytes(); // Protocol identifier
+        byte[] zeros = new byte[10]; // Padding
+        byte[] p_id = ByteBuffer.allocate(4).putInt(this.hostId).array(); // Peer ID
+
+        // Build the handshake message
+        send.write(header, 0, 18);
+        send.write(zeros, 0, 10);
+        send.write(p_id, 0, 4);
+
+        writeLogMessage("Peer " + this.hostId + " makes a connection to " + this.clientId + ".");
+        out.write(send.toByteArray()); // Send the handshake message
+
+        acknowledgeHandshakeCompletion(); // Acknowledge the handshake
+    } catch (IOException ioException) {
+        ioException.printStackTrace();
+    }
+}
+
+    private void receiveMessageWithPayload(byte type, int msgLen) {
     int curr_read = 0;
     byte[] payload = new byte[msgLen]; // Store the received message payload
     int current_package_length;
@@ -634,49 +739,18 @@ public void run() {
 }
 
 
-        private void processMessageWithoutPayload(byte type) {
-    // Update state variables based on message type
-
-    if (type == CHOKE) {
-        host_choked = true; // Host is choked, stop receiving pieces
-        writeLogMessage("Peer " + hostId + " received choke message from Peer " + clientId);
-        hostBitfield.currentlyRequesting.remove(this.clientId); // Remove requests from the host
-    } else if (type == UNCHOKE) {
-        host_choked = false; // Host is unchoked, can receive pieces
-        writeLogMessage("Peer " + hostId + " received unchoke message from Peer " + clientId);
-
-        // Check if the host is interested in pieces from the client
-        host_interested = checkForMissingPieces(clientBitfield.bits);
-
-        // Request a missing piece if interested
-        if (host_interested) {
-            int next_piece = selectRandomMissingPiece();
-            if (next_piece >= 0) {
-                hostBitfield.addPieceRequest(this.clientId, next_piece);
-                requestFilePiece(next_piece); // Request the next piece
-            }
-        }
-    } else if (type == INTERESTED) {
-        client_interested = true; // Client is interested in receiving pieces
-        writeLogMessage("Peer " + hostId + " received interest message from Peer " + clientId);
-
-    } else if (type == NOT_INTERESTED) {
-        client_interested = false; // Client is no longer interested
-        writeLogMessage("Peer " + hostId + " received not interested message from Peer " + clientId);
-    }
-}
 
 public PeerMessageProcessor(Socket connection, Peer client, Peer host, Bitfield host_bitfield, Bitfield client_bitfield, byte[][] pieces, HashMap<Integer, Double> rates) {
     // Initialize peer connection and data
     this.connection = connection;
 
     this.pieces = pieces;
-    this.hostId = host.peerID;
+    this.hostId = host.node_identifier;
     this.hostBitfield = host_bitfield;
-    this.host_has_file = host.hasFile;
+    this.host_has_file = host.is_file_downloaded;
 
-    this.clientId = client.peerID;
-    this.client_has_file = client.hasFile;
+    this.clientId = client.node_identifier;
+    this.client_has_file = client.is_file_downloaded;
     this.clientBitfield = client_bitfield;
 
     this.rates = rates;
@@ -718,30 +792,7 @@ public PeerMessageProcessor(Socket connection, Peer client, Peer host, Bitfield 
 }
 
 
-        public void initiateConnectionHandshake() {
-    try {
-        writeLogMessage("Initiating existing peer handshake: " + clientId);
 
-        // Prepare the handshake message
-        ByteArrayOutputStream send = new ByteArrayOutputStream(32);
-
-        byte[] header = "P2PFILESHARINGPROJ".getBytes(); // Protocol identifier
-        byte[] zeros = new byte[10]; // Padding
-        byte[] p_id = ByteBuffer.allocate(4).putInt(this.hostId).array(); // Peer ID
-
-        // Build the handshake message
-        send.write(header, 0, 18);
-        send.write(zeros, 0, 10);
-        send.write(p_id, 0, 4);
-
-        writeLogMessage("Peer " + this.hostId + " makes a connection to " + this.clientId + ".");
-        out.write(send.toByteArray()); // Send the handshake message
-
-        acknowledgeHandshakeCompletion(); // Acknowledge the handshake
-    } catch (IOException ioException) {
-        ioException.printStackTrace();
-    }
-}
 
 public void waitForConnectionHandshake() {
     try {
@@ -787,6 +838,27 @@ public void sendHandshakeResponse() {
         Thread.currentThread().interrupt();
     }
 }
+
+public void signalInterestToPeer() {
+    try {
+        // Prepare the INTERESTED message to signal interest in the file
+        ByteArrayOutputStream send = new ByteArrayOutputStream(5);
+        byte[] length = ByteBuffer.allocate(4).putInt(1).array(); // Message length
+        byte[] type = new byte[]{INTERESTED}; // Message type (INTERESTED)
+
+        send.write(length, 0, 4); // Add length
+        send.write(type, 0, 1); // Add type
+
+        host_interested = true; // Mark the host as interested
+
+        out.write(send.toByteArray()); // Send the message
+
+        writeLogMessage("Peer " + hostId + " sent Interest message to Peer " + clientId);
+    } catch (IOException ioException) {
+        Thread.currentThread().interrupt(); // Handle I/O exceptions
+    }
+}
+
 
 public void acknowledgeHandshakeCompletion() {
     try {
@@ -890,25 +962,6 @@ public void requestFilePiece(int index) {
     }
 }
 
-public void signalInterestToPeer() {
-    try {
-        // Prepare the INTERESTED message to signal interest in the file
-        ByteArrayOutputStream send = new ByteArrayOutputStream(5);
-        byte[] length = ByteBuffer.allocate(4).putInt(1).array(); // Message length
-        byte[] type = new byte[]{INTERESTED}; // Message type (INTERESTED)
-
-        send.write(length, 0, 4); // Add length
-        send.write(type, 0, 1); // Add type
-
-        host_interested = true; // Mark the host as interested
-
-        out.write(send.toByteArray()); // Send the message
-
-        writeLogMessage("Peer " + hostId + " sent Interest message to Peer " + clientId);
-    } catch (IOException ioException) {
-        Thread.currentThread().interrupt(); // Handle I/O exceptions
-    }
-}
 
 public void signalLackOfInterestToPeer() {
     try {
@@ -929,6 +982,27 @@ public void signalLackOfInterestToPeer() {
         Thread.currentThread().interrupt(); // Handle I/O exceptions
     }
 }
+
+public int selectRandomMissingPiece() {
+    // Create a map to store pieces that are available in the client bitfield but missing in the host bitfield
+    HashMap<Integer, Byte> possiblePieces = new HashMap<>();
+
+    // Identify pieces that are available in the client but missing in the host
+    for (int i = 0; i < clientBitfield.bits.length; i++) {
+        if (clientBitfield.bits[i] == (byte) 1 && hostBitfield.bits[i] == (byte) 0) {
+            possiblePieces.put(i, clientBitfield.bits[i]);
+        }
+    }
+
+    // If there are missing pieces, select one randomly
+    if (possiblePieces.size() > 0) {
+        int member = new Random().nextInt(possiblePieces.size()); // Select a random piece
+        Object[] keyArray = possiblePieces.keySet().toArray(); // Convert map keys to an array
+        return (int) keyArray[member]; // Return the index of the selected piece
+    } else {
+        return -1; // Return -1 if no missing pieces are found
+    }
+    }
 
 public void chokePeerConnection() {
     try {
@@ -1030,49 +1104,6 @@ public void chokePeerConnection() {
     logger.info(toBeLogged); // Log the message using the logger
 }
 
-public int selectRandomMissingPiece() {
-    // Create a map to store pieces that are available in the client bitfield but missing in the host bitfield
-    HashMap<Integer, Byte> possiblePieces = new HashMap<>();
-
-    // Identify pieces that are available in the client but missing in the host
-    for (int i = 0; i < clientBitfield.bits.length; i++) {
-        if (clientBitfield.bits[i] == (byte) 1 && hostBitfield.bits[i] == (byte) 0) {
-            possiblePieces.put(i, clientBitfield.bits[i]);
-        }
-    }
-
-    // If there are missing pieces, select one randomly
-    if (possiblePieces.size() > 0) {
-        int member = new Random().nextInt(possiblePieces.size()); // Select a random piece
-        Object[] keyArray = possiblePieces.keySet().toArray(); // Convert map keys to an array
-        return (int) keyArray[member]; // Return the index of the selected piece
-    } else {
-        return -1; // Return -1 if no missing pieces are found
-    }
-}
-
-    }
-
- public boolean isDownloadCompleteForAllPeers() {
-    // Check if this peer has downloaded all pieces
-    if (!this.bitfield.checkIfAllPiecesAreDownloaded()) {
-        return false;
-    }
-
-    // Check if all connected peers have downloaded all pieces
-    for (PeerMessageProcessor peer : connectionArray.values()) {
-        if (!peer.clientBitfield.checkIfAllPiecesAreDownloaded()) {
-            return false;
-        }
-    }
-    return true;  // Return true if all peers have completed the download
-}
-
-public class PeriodicNeighborSelector extends TimerTask {
-    // Periodically selects top peers based on their download rate
-    public void run() {
-        identifyTopPeersBasedOnRate();
-    }
 }
 
 public class OptimisticUnchokeTask extends TimerTask {
@@ -1082,30 +1113,6 @@ public class OptimisticUnchokeTask extends TimerTask {
     }
 }
 
-public static void main(String[] args) throws Exception {
-    // Ensure a command line argument for peer ID is provided
-    if (args.length == 0) {
-        throw new Exception("Error: Peer ID must be provided");
-    }
 
-    // Check if the peer ID is a valid integer
-    int peer_ID_input;
-    try {
-        peer_ID_input = Integer.parseInt(args[0]);
-    } catch (NumberFormatException e) {
-        throw new Exception("Error: Peer ID must be an integer");
-    }
-
-    // Delete any existing log files for the given peer ID
-    File folder = new File(".");
-    for (File f : folder.listFiles()) {
-        if (f.getName().endsWith(peer_ID_input + ".log")) {
-            f.delete();
-        }
-    }
-
-    // Create and start the peer process for the specified peer ID
-    peerProcess peer_process = new peerProcess(peer_ID_input);
-}
 
 }
