@@ -34,7 +34,7 @@ We have used 6 machines to run the project: 4 Thunder servers and 2 Storm server
 ssh your_username@thunder.cise.ufl.edu
 
 ## 3. Prepare the Configuration Files
--Use the following configuration to set up your peers:
+- Use the following configuration to set up your peers:
 1001 thunder.cise.ufl.edu 6408 1
 1002 thunder.cise.ufl.edu 6409 0
 1003 thunder.cise.ufl.edu 6410 0
@@ -46,12 +46,12 @@ ssh your_username@thunder.cise.ufl.edu
 -git clone https://github.com/your_username/P2PFileTransfer.git
 
 ##	5.	Navigate to the project directory and run the following commands:
--cd ~/P2PFileTransfer/project
--javac peerProcess.java
--In different machines run following commands:
--java peerProcess 1001
--java peerProcess 1002
--java peerProcess 1003
--java peerProcess 1004
--java peerProcess 1005
--java peerProcess 1006
+- cd ~/P2PFileTransfer/project
+- javac peerProcess.java
+- In different machines run following commands:
+- java peerProcess 1001
+- java peerProcess 1002
+- java peerProcess 1003
+- java peerProcess 1004
+- java peerProcess 1005
+- java peerProcess 1006
