@@ -43,8 +43,7 @@ ssh your_username@thunder.cise.ufl.edu
 1006 storm.cise.ufl.edu   6413 0
 
 ## 4. Clone the Repository
--git clone https://github.com/your_username/P2PFileTransfer.git
-
+-git clone https://github.com/ShahVandit/cn_project.git
 ##	5.	Navigate to the project directory and run the following commands:
 - cd ~/P2PFileTransfer/project
 - javac peerProcess.java
