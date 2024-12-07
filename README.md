@@ -54,3 +54,14 @@ ssh your_username@thunder.cise.ufl.edu
 - java peerProcess 1004
 - java peerProcess 1005
 - java peerProcess 1006
+
+## Initial Folder Structure
+P2PFileTransfer/
+├── project/
+│   ├── 1001/
+│   │   └── testfile.pptx
+│   ├── Common.cfg
+│   ├── PeerInfo.cfg
+│   ├── logger.properties
+│   ├── peerProcess.java
+│   └── log_peer_<peer_id>.log
